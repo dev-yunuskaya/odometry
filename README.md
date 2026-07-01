@@ -1,170 +1,283 @@
-# İkinci Görev (Pozisyon Tespiti) — Sıfırdan Yol Haritası
+# İkinci Görev (Pozisyon Tespiti) İçin Sıfırdan Öğrenme Yol Haritası
 
-> **Varsayım:** Python biliyorsun, temel programlama tecrüben var ama bilgisayarlı görü / SLAM konusunda yenisin. Yol haritası Python + OpenCV (+ istersen ileride PyTorch) üzerine kurulu. Farklıysa söyle, uyarlarım.
-
----
-
-## 0. Önce görevi doğru sökelim (bu adımı atlama)
-
-Şartnameden (2.2 ve Tablo 6) çıkan gerçek problem şu:
-
-- Kameran neredeyse dik (70-90°) aşağı bakıyor, sen aracın **ilk kareye göre x,y,z yer değiştirmesini** (metre) tahmin ediyorsun.
-- Her karede sana `health_status` (sağlık) bilgisi geliyor:
-  - **health=1**: ilk 1 dakika (450 kare) garanti sağlıklı — yani sana **gerçek referans değeri** veriliyor. Bu aralıkta istersen kendi tahminini, istersen sunucudan gelen değeri gönderebilirsin.
-  - **health=0**: son 4 dakikada (1800 kare) ne zaman başlayıp ne kadar süreceği belirsiz şekilde "GPS kaybı" simüle ediliyor — burada **zorunlu olarak kendi algoritman** konuşacak.
-- Puan, tahminin ile gerçek pozisyon arasındaki **ortalama Öklid mesafesi hatası** (Denklem 2) üzerinden hesaplanıyor.
-
-**Buradan çıkan en kritik strateji (işin mutfağı tam burası):**
-Saf monoküler VO'nun en büyük laneti **ölçek belirsizliğidir** (tek kameradan piksel hareketini kaç metreye karşılık geldiğini bilemezsin). Ama bu yarışma sana bunu bedavaya çözüyor: health=1 pencerelerinde gerçek metre cinsinden yer değiştirmeyi zaten biliyorsun. Yani asıl işin "boşlukta pozisyon kestirmek" değil, **health=1 anlarını kalibrasyon sinyali olarak kullanıp health=0 boşluklarını doldurmak.** Bu, klasik "GPS kesintisinde görsel odometri ile devam etme" (dead-reckoning) problemidir — robotik literatüründe çok çalışılmış, iyi bilinen bir konu. Bunu bilmek, tekerleği yeniden icat etmeni engeller.
+> TEKNOFEST 2026 Havacılıkta Yapay Zekâ Yarışması — Görev 2: Pozisyon Tespiti
 
 ---
 
-## Faz Özeti (öncelik sırası)
+## 0. Bu Görev Aslında Ne?
 
-| Faz | Konu | Neden şart | Yaklaşık süre |
-|---|---|---|---|
-| 1 | Kamera geometrisi temelleri | Her yöntemin altyapısı, kamera parametreleri sana verilecek | 3-5 gün |
-| 2 | Klasik CV baseline (OpenCV) | Hızlı çalışan ilk sonuç, hata kaynaklarını görmek için | 1 hafta |
-| 3 | Aşağı-bakan kamera özel stratejisi | Bu görevin gerçek çekirdeği (ölçek + irtifa) | 1-2 hafta |
-| 4 | Durum kestirimi / filtreleme | Drift kontrolü, health geçişlerini yönetmek | 1 hafta |
-| 5 | Derin öğrenme (sağlamlaştırma) | Bulanıklık, kar/yağmur, termal kamera gibi bozulmalara dayanıklılık | 2-3 hafta |
-| 6 | Veri & simülasyon | Resmi veri seti yayınlanana kadar test/eğitim verisi | Paralel yürür |
-| 7 | Kendi değerlendirme sistemin | Kör optimizasyon yapmamak için | 2-3 gün (erken kur) |
-| 8 | İterasyon | Sürekli | Yarışmaya kadar |
+Şartnameyi teknik literatüre çevirirsek: bu görev, bilgisayarlı görü alanında **"Monoküler Görsel Odometri" (Monocular Visual Odometry / Visual Ego-Motion Estimation)** olarak bilinen klasik bir problemdir. Drone'ların GPS'siz ortamda konum kestirimi yapması için kullanılan tekniklerle birebir aynı mantığı taşır (ör. PX4Flow gibi optik akış sensörleri).
+
+**Neden zor?**
+- Sadece kamera görüntüsü var, mesafe sensörü (lidar, radar) yok.
+- Tek kameradan (monoküler) elde edilen harekette doğal bir **"ölçek belirsizliği" (scale ambiguity)** vardır: görüntüden sadece hareketin *yönünü* çıkarabilirsin, *büyüklüğünü* (metre cinsinden) çıkaramazsın — bunu başka bir ipucuyla (bilinen nesne boyutu, yer düzlemi varsayımı, öğrenilmiş model vb.) tamamlaman gerekir.
+- Kamera açısı sabit değil (70-90°), irtifa değişebilir, görüntülerde bulanıklık/donma/piksel kaybı gibi bozulmalar olabilir.
+- Hata metriği (Denklem 2), üç eksende referans ile tahmin arasındaki Öklid mesafesinin ortalamasıdır — SLAM/VO literatüründeki **ATE (Absolute Trajectory Error)** ile birebir aynı mantık.
+
+**İki ana çözüm yaklaşımı** (şartname ikisine de izin veriyor):
+1. **Klasik/Geometrik yaklaşım:** Öznitelik eşleştirme + epipolar geometri + poz kestirimi (yani "elle" matematik).
+2. **Öğrenen model yaklaşımı:** CNN/RNN tabanlı uçtan uca konum regresyonu (DeepVO, PoseNet tarzı).
+
+Aşağıdaki yol haritası seni **sıfırdan** başlatıp, önce klasik yaklaşımı anlayacak seviyeye, sonra istersen derin öğrenme yaklaşımına taşıyacak şekilde tasarlandı. Klasik yol daha açıklanabilir ve daha az veriyle çalışır; bu yüzden önce onu öğrenmeni öneririm.
 
 ---
 
-## Faz 1 — Matematiksel / Geometrik Temel
+## Aşama 1 — Programlama Temelleri (Python)
 
-**Neden:** Kamera parametreleri (intrinsic) sana paylaşılacak (2.2.1). Bu matrisi kullanamazsan hiçbir VO yöntemi doğru çalışmaz. Pinhole kamera modeli, homojen koordinatlar, dönüş matrisleri, homografi/esansiyel matris kavramlarını bilmeden ne klasik ne de derin öğrenme yaklaşımı anlamlı olur.
+**Neden?** Bu alandaki hemen hemen tüm araçlar (OpenCV, NumPy, PyTorch) Python tabanlı. Ayrıca yarışma sunucusuyla JSON/HTTP üzerinden konuşacaksın, bu da programlama bilgisi gerektirir.
 
-**Öğrenmen gerekenler:**
-- Pinhole kamera modeli, intrinsic (K) ve extrinsic (R,t) parametreler
-- Homojen koordinatlar, projeksiyon
-- Homografi (H) ve esansiyel matris (E) — ne zaman hangisi kullanılır
-- Temel epipolar geometri
+**Öğrenilecekler:**
+- Python temel sözdizimi (değişkenler, döngüler, fonksiyonlar, sınıflar)
+- NumPy ile dizi/matris işlemleri (görüntüler aslında sayı matrisidir)
+- Dosya okuma/yazma, JSON ile çalışma
+- `requests` kütüphanesi ile API/HTTP istekleri (sunucudan görüntü çekmek, sonuç göndermek için)
 
 **Kaynaklar:**
-- *Multiple View Geometry in Computer Vision* — Hartley & Zisserman (ilk 6-9 bölüm yeter, "İncil" kitap ama ağır; sadece gerekli kısımları oku)
-- Cyrill Stachniss (Bonn Üniversitesi) — YouTube'daki "Photogrammetry & Robotics" ve fotogrametri/SLAM ders serisi (Türkçe altyazı yok ama çok net anlatım, ücretsiz)
-- OpenCV resmi dokümantasyonu → "Camera Calibration and 3D Reconstruction" bölümü (docs.opencv.org)
-- Coursera: Univ. of Pennsylvania'nın Robotics Specialization serisindeki "Robotics: Perception" dersi (ücretsiz izlenebilir, sertifika ücretli)
+- [Python Resmi Dokümantasyonu](https://docs.python.org/3/tutorial/) — temel referans
+- freeCodeCamp – "Python for Beginners" (YouTube, ücretsiz, tam kurs)
+- Corey Schafer – Python YouTube serisi (özellikle NumPy, JSON, requests videoları)
+- [NumPy — Absolute Beginners Guide](https://numpy.org/doc/stable/user/absolute_beginners.html) (resmi, ücretsiz)
+- "Automate the Boring Stuff with Python" — ücretsiz online kitap (automatetheboringstuff.com)
+- [Python `requests` kütüphanesi dokümantasyonu](https://requests.readthedocs.io/)
 
 ---
 
-## Faz 2 — Klasik Bilgisayarlı Görü ile Baseline (Hızlı Prototip)
+## Aşama 2 — Matematik Temelleri (Lineer Cebir & 3D Geometri)
 
-**Neden:** Şartname videolarda bulanıklık, ölü piksel, kare donması/kaybı olabileceğini açıkça söylüyor (2.1). Karmaşık bir modele atlamadan önce basit, açıklanabilir bir baseline kurup nerede kırıldığını görmek, sonraki fazlarda neye öncelik vereceğini belirler. Ayrıca bu, "mutfaktan başlamak" istediğin kısım — elini koda değdirmenin en hızlı yolu.
+**Neden?** Görsel odometrinin tamamı matris/vektör işlemleridir: kamera hareketini bir dönüş matrisi (rotation) ve öteleme vektörü (translation) ile ifade edersin. Bu temelsiz sonraki aşamalar anlaşılmaz kalır.
 
-**Yapman gerekenler:**
-- ORB / SIFT ile özellik (feature) tespiti ve eşleştirme
-- Optik akış: Lucas-Kanade (seyrek) ve Farneback (yoğun)
-- İki kare arası hareketi essential matrix / homography ile çözüp `cv2.recoverPose` ile R,t çıkarma
-- Basit bir "frame-to-frame" VO döngüsü yazıp konumu biriktirerek (integrate ederek) yörünge çizdirme
+**Öğrenilecekler:**
+- Vektörler, matrisler, matris çarpımı, determinant, ters matris
+- Dönüş matrisleri (rotation matrix), homojen koordinatlar
+- Nokta çarpımı / çapraz çarpım (dot & cross product) — geometrik anlamları
+- Koordinat sistemleri arası dönüşüm (kamera koordinatı ↔ dünya koordinatı)
+- (İleri düzey, opsiyonel) Kuaterniyonlar, Euler açıları
 
 **Kaynaklar:**
-- OpenCV-Python resmi tutorial'ları: "Feature Detection and Description", "Optical Flow" bölümleri
-- Scaramuzza & Fraundorfer, *"Visual Odometry" Part I & Part II* (IEEE Robotics & Automation Magazine, 2011-2012) — alanın klasik, kısa ve öz tutorial makaleleri; VO'nun "nasıl çalışır"ını en iyi özetleyen kaynak
-- GitHub'da minimal monoküler VO örnek projeleri (arama terimi: "monocular visual odometry OpenCV python") — kodu satır satır anlayarak incele, kopyala-yapıştır yapma
+- [3Blue1Brown – "Essence of Linear Algebra"](https://www.youtube.com/playlist?list=PLZHQObOWTQDPD3MizzM2xVFitgF8hE_ab) — YouTube, görsel ve sezgisel anlatım (şiddetle tavsiye edilir)
+- [Khan Academy – Linear Algebra](https://www.khanacademy.org/math/linear-algebra) — ücretsiz, alıştırmalı
+- MIT OCW 18.06 – Gilbert Strang, "Linear Algebra" (YouTube'da tam ders videoları)
+- Cyrill Stachniss (Bonn Üniversitesi) – ["Photogrammetry I" YouTube playlist](https://www.youtube.com/@CyrillStachniss/playlists) içindeki koordinat dönüşümleri / homojen koordinatlar dersleri
 
 ---
 
-## Faz 3 — Aşağı Bakan Kamera İçin Özel Strateji (Asıl Çekirdek)
+## Aşama 3 — Görüntü İşleme Temelleri ve OpenCV
 
-**Neden:** Standart VO literatürünün çoğu ileri bakan (araba, insan gözü perspektifi) kameralar için yazılmış. Senin kameran neredeyse yere dik bakıyor ve sahne genelde yerel olarak düzlemsel (yol, tarla, çatı). Bu, problemi **basitleştirir** — homografi tabanlı yaklaşımlar (drone optik akış sensörlerinin, örn. PX4Flow'un, mantığına çok yakın) essential matrix'ten daha stabil çalışır.
+**Neden?** Öznitelik çıkarmadan, kamera modelini anlamadan önce "görüntü nedir, nasıl işlenir" bilmelisin. OpenCV, bu görevde kullanacağın ana kütüphane olacak.
 
-**Çözülmesi gereken iki alt problem:**
-
-1. **x, y (yatay hareket):** Ardışık kareler arası homografiyi çıkar, düzlemsel sahne varsayımıyla dönüşü ayıkla, kalan öteleme bileşenini piksel cinsinden al.
-2. **z (irtifa değişimi) + ölçek:** Tek kamerada en zor kısım budur. İki pratik yol:
-   - Eşleşen özellik noktaları arasındaki ortalama mesafenin kareler arası **büyüme/küçülme oranı**, irtifa değişimiyle orantılıdır (yaklaşırsan nesneler büyür). Bu "optic flow divergence / focus of expansion" mantığı, arıların irtifa algısı gibi biyoloji-esinli UAV kontrolünde de kullanılır.
-   - **UAP/UAİ alanları 4,5 metre çapında sabit boyutlu** (2.1.2) — görüntüde bu daireleri gördüğünde gerçek ölçek için harika bir referans nesnesi olarak kullanabilirsin.
-
-3. **En önemlisi — piksel→metre kalibrasyonu:** health=1 penceresinde (ilk 450 kare) hem görüntüyü hem gerçek metre cinsinden yer değiştirmeyi biliyorsun. Bu pencereyi kullanarak "piksel hareketi → gerçek metre" dönüşümünü (session'a, yani o anki irtifa/kamera ayarına özel) **regresyon ile kalibre et**. Bu, saf monoküler ölçek belirsizliğini yarı-gözetimli bir probleme çeviriyor — yarışmanın tasarımındaki en büyük avantaj bu.
+**Öğrenilecekler:**
+- Görüntünün piksel matrisi olarak temsili, renk uzayları (RGB, gri tonlama)
+- Filtreleme (bulanıklaştırma, keskinleştirme), kenar tespiti (Canny, Sobel)
+- Video kare (frame) okuma/yazma, ardışık karelerle çalışma
+- Görüntü bozulmalarıyla başa çıkma (şartnamede bahsedilen bulanıklık, ölü piksel, donma gibi durumlar için ön işleme)
 
 **Kaynaklar:**
-- PX4Flow projesi dokümantasyonu (aşağı bakan optik akış sensörünün prensip mantığı — donanım değil ama algoritma mantığı doğrudan işine yarar)
-- Arama terimleri: *"optical flow based altitude estimation UAV"*, *"homography based visual odometry downward facing camera"*, *"time to contact optical flow"*
-- "Vision-based state estimation for autonomous rotorcraft MAVs" başlıklı akademik makaleler (Google Scholar'da bu terimle arama yap, konuya en yakın literatür burada)
+- [OpenCV-Python Resmi Tutorials](https://docs.opencv.org/4.x/d6/d00/tutorial_py_root.html) — en güvenilir kaynak
+- freeCodeCamp – ["OpenCV Course – Full Tutorial with Python"](https://www.youtube.com/watch?v=oXlwWbU8l2o) (YouTube, ücretsiz tam kurs)
+- "Programming Computer Vision with Python" — Jan Erik Solem, ücretsiz PDF (programmingcomputervision.com)
+- PyImageSearch blog (Adrian Rosebrock) — pratik, kod odaklı OpenCV yazıları
 
 ---
 
-## Faz 4 — Durum Kestirimi / Filtreleme (Drift Kontrolü)
+## Aşama 4 — Kamera Modeli, Kalibrasyon ve Projektif Geometri
 
-**Neden:** Kare-kare hareket tahminleri gürültülüdür; bunları düz toplarsan hata katlanarak büyür (drift). Puanlama tüm kareler üzerinden **ortalama** hataya bakıyor, yani uzun health=0 bloklarında drift kontrolsüz büyürse skorun çöker. Ayrıca health bayrağı 0↔1 arasında geçiş yapabileceği için (2.2.2), bu geçişleri yumuşak yönetecek bir filtre mimarisine ihtiyacın var.
+**Neden?** Şartnamede "hava aracının kamera parametre bilgileri yarışmacılarla paylaşılacaktır" deniyor — yani sana kameranın **intrinsic** (odak uzaklığı, optik merkez) parametreleri verilecek. Bunları nasıl kullanacağını bilmen şart. Ayrıca 3D dünyanın 2D görüntüye nasıl izdüşürüldüğünü (projection) anlamadan hareket kestirimi imkânsız.
 
-**Yapman gerekenler:**
-- Basit bir Kalman Filtresi (veya complementary filter) ile ardışık VO tahminlerini birleştirip pürüzsüz bir yörünge üret
-- health=1 anlarında filtreyi gerçek değere "resetle/düzelt", health=0'da sadece kendi tahminlerinle devam et (dead-reckoning)
-- Aşırı güvenilmeyen (düşük eşleşme sayısı, bulanık kare gibi) tahminleri filtrenin ölçüm gürültüsü olarak ağırlıklandır
+**Öğrenilecekler:**
+- İğne deliği (pinhole) kamera modeli
+- İçsel (intrinsic) parametre matrisi K, dışsal (extrinsic) parametreler R, t
+- Lens distorsiyonu ve düzeltilmesi
+- Kamera kalibrasyonu (satranç tahtası yöntemi)
+- Homografi (düzlemsel sahne dönüşümü) — yer düzlemine bakan bir kamera için kritik
 
 **Kaynaklar:**
-- *Kalman and Bayesian Filters in Python* — Roger R. Labbe Jr. (GitHub'da ücretsiz, interaktif Jupyter kitap — bu konuda en pratik, en az matematik korkutucu kaynak)
-- *Probabilistic Robotics* — Thrun, Burgard, Fox (daha akademik, Kalman/Particle filter'ın robotik bağlamdaki standart referansı)
-- Cyrill Stachniss'in aynı YouTube kanalındaki state estimation / Kalman filter dersleri
+- **"Multiple View Geometry in Computer Vision"** — Hartley & Zisserman (bu alanın "İncil"i sayılır; 1-4 ve 9-11. bölümler bu görev için en kritik olanlar)
+- Cyrill Stachniss – ["Photogrammetry I & II" YouTube playlist](https://www.youtube.com/@CyrillStachniss/playlists) — kamera modeli, kalibrasyon, homografi konuları çok net anlatılıyor
+- Shree Nayar (Columbia Üniversitesi) – ["First Principles of Computer Vision"](https://www.youtube.com/@firstprinciplesofcomputerv3258) YouTube kanalı, "Camera Models" ve "Geometric Camera Models" playlist'leri
+- [OpenCV Kamera Kalibrasyon Tutorial'ı](https://docs.opencv.org/4.x/dc/dbb/tutorial_py_calibration.html) (resmi)
 
 ---
 
-## Faz 5 — Derin Öğrenme ile Sağlamlaştırma (İleri Seviye)
+## Aşama 5 — Öznitelik Tespiti, Eşleştirme ve Optik Akış
 
-**Neden:** Şartname açıkça diyor ki görüntüler: kar/yağmur olabilir, şehir/orman/deniz üzerinde çekilebilir, RGB veya termal olabilir, bulanıklık/ölü piksel/kare donması içerebilir (2.1). Klasik özellik eşleştirme (ORB/SIFT) bu koşullarda kolayca kırılır — özellikle termalde veya düşük kontrastlı sahnelerde (deniz üstü!) eşleşecek "köşe" bulamayabilirsin. Derin öğrenme tabanlı akış/VO modelleri bu tür bozulmalara karşı daha dayanıklı olabilir. Şartname "algoritma hızı puanlanmıyor, saniyede 1 kare işlesen yeterli" diyor (Bölüm 7) — bu da ağır modelleri kullanabileceğin anlamına geliyor.
+**Neden?** Görsel odometrinin ilk adımı: ardışık iki karede **aynı fiziksel noktaları** bulmaktır. Bunu iki şekilde yapabilirsin: (a) belirgin noktaları (köşe, kenar) tespit edip eşleştirerek, (b) optik akış ile piksellerin hareketini takip ederek. Drone'lar genelde optik akış tabanlı çalışır çünkü sahne genelde yer/zemin gibi düşük tekstürlü olabilir.
 
-**Seçeneklerin (kolaydan zora):**
-1. Klasik geometriyi koru, sadece özellik eşleştirmeyi güçlü bir derin optik akış ağıyla değiştir (hibrit yaklaşım)
-2. Uçtan uca öğrenen VO modeli (kare çifti → doğrudan öteleme tahmini)
-3. Kendi kendini denetleyen (self-supervised) derinlik+poz ağları — etiketli hava aracı veri seti azlığı sorununu çözer çünkü etiketsiz videoyla eğitilebilir
+**Öğrenilecekler:**
+- Köşe tespiti: Harris, Shi-Tomasi
+- Öznitelik tanımlayıcıları: SIFT, ORB, AKAZE
+- Eşleştirme yöntemleri: Brute-Force, FLANN
+- Aykırı değer (outlier) temizleme: RANSAC
+- Optik akış: Lucas-Kanade (seyrek), Farneback (yoğun)
 
 **Kaynaklar:**
-- RAFT — *"Recurrent All-Pairs Field Transforms for Optical Flow"* (Teed & Deng, 2020) — güncel, güçlü optik akış ağı, GitHub: `princeton-vl/RAFT`
-- DeepVO — *"Towards End-to-End Visual Odometry with Deep Recurrent Convolutional Neural Networks"* (Wang ve ark., 2017)
-- TartanVO — CMU'nun genelleştirilebilir öğrenen VO modeli (Wang ve ark., 2020), TartanAir veri setiyle birlikte yayınlandı
-- Monodepth2 — *"Digging Into Self-Supervised Monocular Depth Estimation"* (Godard ve ark., 2019), GitHub: `nianticlabs/monodepth2` — self-supervised derinlik+poz mimarisini anlamak için iyi bir başlangıç
+- [OpenCV – Feature Detection & Description Tutorials](https://docs.opencv.org/4.x/db/d27/tutorial_py_table_of_contents_feature2d.html)
+- [OpenCV – Optical Flow Tutorial](https://docs.opencv.org/4.x/d4/dee/tutorial_optical_flow.html)
+- Shree Nayar – "First Principles of Computer Vision" kanalındaki **Feature Detection** ve **Optical Flow** playlist'leri
+- Cyrill Stachniss – RANSAC ve öznitelik eşleştirme dersleri (Photogrammetry II)
+- PyImageSearch – "Feature Matching" ve "Optical Flow" pratik yazıları
 
 ---
 
-## Faz 6 — Veri ve Simülasyon
+## Aşama 6 — Epipolar Geometri ve Hareket Kestirimi (Klasik VO'nun Çekirdeği)
 
-**Neden:** Resmi örnek veri seti GitHub üzerinden paylaşılacak (Bölüm 10) ama muhtemelen sınırlı olacak. Model geliştirme/test için ek veriye ihtiyacın olacak, özellikle derin öğrenmeye gidersen.
+**Neden?** Burası klasik görsel odometrinin kalbi: iki kare arasındaki eşleşmiş noktalardan, kameranın **ne yöne döndüğünü ve ne yöne hareket ettiğini** matematiksel olarak çıkarırsın.
+
+**Öğrenilecekler:**
+- Epipolar geometri, temel matris (Fundamental Matrix) ve öz matris (Essential Matrix)
+- 8-nokta algoritması
+- `cv2.findEssentialMat` ve `cv2.recoverPose` fonksiyonları (OpenCV)
+- Ölçek belirsizliği problemi (bir sonraki aşamada çözülecek)
+- Basit bir "iki kare arası poz kestirimi" pipeline'ı kurmak
 
 **Kaynaklar:**
-- **Microsoft AirSim** — Unreal Engine tabanlı simülatör; aşağı bakan kamera + gerçek zemin doğrusu (ground truth) poz üretebiliyor, tam da bu görevin ihtiyacı olan senaryoyu sentetik olarak kurabilirsin
-- **TartanAir** (CMU) — zorlu ortamlar için sentetik SLAM/VO veri seti
-- **Mid-Air Dataset** — düşük irtifa drone uçuşları için çok-modlu veri seti
-- **UZH-FPV Drone Racing Dataset** (Zürih Üniversitesi) — gerçek drone VO/VIO verisi
-- **EuRoC MAV Dataset** — iç mekan ama VO/VIO pipeline'ını ilk kez ayağa kaldırmak için standart benchmark
-- **VisDrone / UAVDT** — VO için etiketli değil ama gerçekçi hava görüntüsü çeşitliliğini (bulanıklık, farklı irtifa, farklı sahne) görmek için faydalı
-- Gazebo + PX4 SITL — istersen daha gerçekçi fizik simülasyonu için
+- Hartley & Zisserman kitabı, 9-11. bölümler (Essential/Fundamental Matrix)
+- Cyrill Stachniss – "Photogrammetry II" içindeki Epipolar Geometri dersleri
+- [OpenCV `recoverPose` dokümantasyonu](https://docs.opencv.org/4.x/d9/d0c/group__calib3d.html)
+- **Avi Singh – "Monocular Visual Odometry using OpenCV"** (blog + GitHub kod: `avisingh599/mono-vo`) — bu konuda en pratik, adım adım kodlu anlatımlardan biri; kesinlikle incelemeni öneririm
 
 ---
 
-## Faz 7 — Kendi Değerlendirme Sistemin (Erken Kur!)
+## Aşama 7 — Ölçek (Scale) Problemi ve Metrik Pozisyon Kestirimi
 
-**Neden:** Denklem 2'deki hata formülünü (ortalama Öklid mesafesi) birebir kendi test scriptine yazmadan, hangi değişikliğin skoru gerçekten iyileştirdiğini bilemezsin.
+**Neden?** Bu, senin görevini diğer standart VO problemlerinden ayıran en kritik nokta: yarışma **metre cinsinden** x, y, z istiyor. Ama monoküler kameradan çıkardığın hareket bilgisi "yönü doğru, büyüklüğü belirsiz" bir vektördür. Bu belirsizliği kapatmak için bir "ölçek referansı" bulmalısın.
 
-**Yapman gereken:**
-- Resmi formülü uygulayan bir `evaluate.py` yaz
-- health=1/health=0 geçişini simüle eden sahte senaryolar kur (örn. elindeki herhangi bir sürekli videoda rastgele bir aralığı "kayıp" say, o aralıkta kendi tahminini kullan, geri kalanında gerçek değeri kullan) — böylece drift'in zamana göre nasıl büyüdüğünü gözlemleyebilirsin
+**Fikirler / öğrenilecekler:**
+- Yer düzlemi (ground plane) varsayımı + bilinen kamera irtifası → homografi ile ölçek kestirimi
+- **Şartnamedeki UAP/UAİ alanlarının çapının sabit 4,5 metre olduğunu biliyorsun** — görüntüde bu daireler görünüyorsa, piksel boyutundan gerçek dünya ölçeğini (metre/piksel) çıkarmak mümkün. Bu, bu yarışmaya özel çok değerli bir ipucu.
+- Yapı-hareketten (Structure from Motion, SfM) temel kavramlar
+- Video'nun ilk karelerindeki "yer değiştirme bilgisi" (translation_x/y/z, sağlıklıyken verilen) kullanılarak ölçek kalibrasyonu yapılması (şartname bunu zaten öneriyor)
 
----
-
-## Faz 8 — İterasyon Planı
-
-1. Faz 2'deki baseline'ı çalıştır → hata sayısını al
-2. Faz 3'ün kalibrasyon fikrini ekle → en büyük iyileşme muhtemelen burada gelecek
-3. Faz 4 filtresini ekle → drift'i düzleştir
-4. Hataların hangi koşullarda (bulanık kare, düşük ışık, deniz üstü vs.) yoğunlaştığını incele
-5. Sadece gerekli olan yerlerde Faz 5'e (derin öğrenme) geç — her yeri deep learning ile çözmeye çalışma, klasik yöntem zaten iyi çalışıyorsa üstüne katman ekleme
+**Kaynaklar:**
+- Avi Singh'in mono-vo blog yazısındaki "ölçek" bölümü (pratik yaklaşım örneği)
+- Google Scholar'da arama: *"monocular visual odometry scale recovery UAV"*, *"ground plane homography altitude estimation drone"*
+- Cyrill Stachniss – Homografi ve düzlemsel sahne dersleri (Photogrammetry I)
+- "Vision-based state estimation for UAVs" konulu akademik derleme (survey) makaleleri — Google Scholar'da bulunabilir
 
 ---
 
-## Unutma
+## Aşama 8 (Opsiyonel ama Rekabetçi Olmak İçin Önerilir) — Derin Öğrenme ile Pozisyon Kestirimi
 
-- **GitHub proje deposu** ve **Google Groups** sayfalarını takip et (Bölüm 10) — örnek veri seti, gerçek JSON formatı ve kamera parametreleri buradan gelecek.
-- **Çevrimiçi Yarışma Simülasyonu** (Mayıs ayı, Bölüm 6) 1. oturumla aynı kural ve temada olacak — ikinci görev için de burada canlı test şansın olacak, bu tarihe kadar en azından Faz 1-4'ü bitirmiş olmak hedefin olsun.
+**Neden?** Şartname "öğrenen modeller de kullanılabilir" diyor. Uçtan uca öğrenen bir model (CNN/RNN), görüntüdeki bulanıklık, ölü piksel, hava koşulları gibi gürültülere klasik yönteme göre daha dayanıklı olabilir ve eğitim verisinden ölçeği örtük şekilde öğrenebilir. Bu, klasik yöntemi tamamlayan/geliştiren bir katman olarak düşünülmeli.
+
+**Öğrenilecekler:**
+- Yapay sinir ağı temelleri, ileri/geri yayılım (forward/backpropagation)
+- Evrişimli Sinir Ağları (CNN) — görüntüden öznitelik çıkarma
+- Zaman serisi/dizisel modeller (RNN, LSTM) — ardışık karelerden hareket kestirimi için
+- PyTorch ile model kurma, eğitme, kayıp fonksiyonu (regresyon için MSE)
+- Önceden eğitilmiş modellerden transfer öğrenme (ResNet, FlowNet gibi omurgalar)
+
+**Kaynaklar:**
+- [PyTorch Resmi "60 Minute Blitz" ve Tutorials](https://pytorch.org/tutorials/) — resmi, pratik
+- Andrew Ng – ["Deep Learning Specialization"](https://www.coursera.org/specializations/deep-learning) (Coursera) — teorik temel için çok sağlam
+- Stanford CS231n – "Convolutional Neural Networks for Visual Recognition" (YouTube'da ücretsiz ders videoları + cs231n.stanford.edu notları)
+- fast.ai – "Practical Deep Learning for Coders" (ücretsiz, uygulamalı)
+- Makaleler (akademik, Google Scholar / arXiv üzerinden bulunabilir):
+  - **DeepVO** (Wang et al., 2017) — CNN+RNN ile uçtan uca görsel odometri
+  - **PoseNet** (Kendall et al., 2015) — CNN ile kamera poz regresyonu
+  - **TartanVO** — genelleştirilebilir öğrenen VO modeli
 
 ---
 
-### Bu hafta somut ilk adım
-1. OpenCV kur, elindeki herhangi bir drone/hava videosunda (YouTube'dan indir ya da telefonundan çek) ORB eşleştirme + optik akış dene.
-2. İki kare arası homografi çıkarıp `cv2.recoverPose` ile R,t elde et.
-3. Piksel hareketini metreye çevirme problemini kâğıt üzerinde çöz — bu yarışmanın can alıcı noktası, kod yazmadan önce anlamış olman lazım.
+## Aşama 9 — Hazır Görsel Odometri / SLAM Sistemlerini İnceleme
+
+**Neden?** Sıfırdan yazmadan önce (veya kendi sistemini geliştirirken referans almak için) alanın en iyi açık kaynak sistemlerinin nasıl çalıştığını anlamak, hem fikir verir hem de "iskelet" olarak kullanılabilir.
+
+**Öğrenilecekler / incelenecekler:**
+- **ORB-SLAM3** — öznitelik tabanlı, en çok referans alınan açık kaynak SLAM/VO sistemi (GitHub: `UZ-SLAMLab/ORB_SLAM3`)
+- **DSO (Direct Sparse Odometry)** — doğrudan (feature-free) yöntem örneği
+- **VINS-Mono** — kamera + IMU birleşik VO (senin görevinde IMU yok ama pipeline mantığı öğretici)
+
+**Kaynaklar:**
+- Cyrill Stachniss – ["Robot Mapping / SLAM" YouTube playlist](https://www.youtube.com/@CyrillStachniss/playlists)
+- **"Introduction to Visual SLAM: From Theory to Practice"** — Xiang Gao & Tao Zhang (kitap, kodlu örneklerle; İngilizce çevirisi ücretsiz PDF olarak bulunabilir) — çok pratik, adım adım C++/Python örnekli
+- İlgili GitHub repoları (ORB-SLAM3, DSO) — README ve paper'ları okuyarak mimariyi kavrama
+
+---
+
+## Aşama 10 — Pratik Yapılacak Veri Setleri
+
+**Neden?** Gerçek yarışma verisi yarışma gününe kadar paylaşılmayacak; bu yüzden benzer senaryolarda (havadan/aşağı bakan kamera, değişken irtifa, farklı hava koşulları) alıştırma yapman gerekiyor.
+
+**Veri setleri:**
+- **[KITTI Odometry Benchmark](https://www.cvlibs.net/datasets/kitti/eval_odometry.php)** — VO'nun standart test alanı (yerde araç, ama pipeline pratiği için ideal başlangıç)
+- **[Mid-Air Dataset](https://midair.ulg.ac.be/)** — sentetik drone veri seti, **güneşli, bulutlu, kar gibi farklı hava koşulları** içeriyor; şartnamedeki senaryolara çok yakın
+- **[TartanAir](https://theairlab.org/tartanair-dataset/)** — çeşitli/zorlu senaryolarda sentetik VO veri seti
+- **[EuRoC MAV Dataset](https://projects.asl.ethz.ch/datasets/doku.php?id=kmavvisualinertialdatasets)** — drone görsel-eylemsizlik veri seti
+- **[UZH-FPV Drone Racing Dataset](https://fpv.ifi.uzh.ch/)** — hızlı drone hareketleri
+- **[VisDrone](http://aiskyeye.com/)** — havadan aşağı bakan drone görüntüleri (asıl olarak nesne tespiti içindir ama sahne/açı benzerliği için faydalı)
+
+---
+
+## Aşama 11 — Değerlendirme Metrikleri
+
+**Neden?** Kendi geliştirdiğin algoritmayı yarışma kriterine (Denklem 2 — ortalama Öklid hatası) göre objektif olarak ölçmelisin.
+
+**Öğrenilecekler:**
+- ATE (Absolute Trajectory Error) ve RPE (Relative Pose Error) kavramları — şartnamedeki hata formülü ATE ile birebir aynı mantık
+- Kestirilen ile referans yörüngeyi hizalama (alignment) ve karşılaştırma
+
+**Kaynaklar:**
+- **[`evo` Python paketi](https://github.com/MichaelGrupp/evo)** (Michael Grupp) — SLAM/VO yörünge değerlendirme aracı, doğrudan kullanılabilir
+- [KITTI Odometry Değerlendirme Devkit'i](https://www.cvlibs.net/datasets/kitti/eval_odometry.php)
+- TUM RGB-D Benchmark makalesi — ATE/RPE tanımlarının orijinal kaynağı (Sturm et al., 2012)
+
+---
+
+## Aşama 12 — Yarışmaya Özel Mühendislik Konuları
+
+**Neden?** Algoritman ne kadar iyi olursa olsun, sunucuyla doğru şekilde konuşamazsan puan alamazsın.
+
+**Öğrenilecekler:**
+- `requests` ile JSON tabanlı API çağrıları yapma (GET ile kare alma, POST ile sonuç gönderme)
+- Sıralı kare işleme mantığı (bir sonraki kareyi almadan önce mevcut kareye sonuç göndermek zorunlu olduğu için, senkron/asenkron akışı doğru kurgulama)
+- `gps_health_status` mantığını doğru işleme (1 iken referans/kendi tahminini gönderebilirsin, 0 iken **mutlaka** kendi algoritmanla kestirmen gerekiyor — bu yüzden algoritman health=1 döneminde "kalibre olmalı")
+- Görüntü bozulmalarına (blur, ölü piksel, donma, kare kaybı) karşı dayanıklı ön işleme / hata yönetimi
+
+**Kaynaklar:**
+- [Python `requests` Dokümantasyonu](https://requests.readthedocs.io/)
+- [Python `json` modülü dokümantasyonu](https://docs.python.org/3/library/json.html)
+
+---
+
+## Önerilen Çalışma Sırası (Özet Tablo)
+
+| # | Aşama | Tahmini Süre* | Öncelik |
+|---|-------|---------------|---------|
+| 1 | Python programlama | 2-3 hafta | Zorunlu |
+| 2 | Lineer cebir & 3D geometri | 2-3 hafta | Zorunlu |
+| 3 | Görüntü işleme + OpenCV | 2 hafta | Zorunlu |
+| 4 | Kamera modeli & kalibrasyon | 2 hafta | Zorunlu |
+| 5 | Öznitelik tespiti & optik akış | 2 hafta | Zorunlu |
+| 6 | Epipolar geometri & poz kestirimi | 3 hafta | Zorunlu |
+| 7 | Ölçek problemi çözümü | 2 hafta | Zorunlu |
+| 8 | Derin öğrenme ile VO | 4+ hafta | Opsiyonel/İleri |
+| 9 | Hazır SLAM/VO sistemleri incelemesi | 1-2 hafta | Önerilir |
+| 10 | Veri setleriyle pratik | Sürekli | Zorunlu |
+| 11 | Değerlendirme metrikleri | 3-4 gün | Zorunlu |
+| 12 | Yarışma API entegrasyonu | 1 hafta | Zorunlu |
+
+*Süreler, günde 1-2 saat düzenli çalışmayı varsayan kaba tahminlerdir; önceden programlama/matematik bilgisi varsa çok daha kısa sürer.
+
+---
+
+## Ekstra Stratejik İpuçları
+
+- **Önce klasik yöntemle bir "baseline" (temel referans) sistem kur.** Çalışan bir feature-based VO pipeline'ın olsun; sonra üzerine derin öğrenme katarak iyileştirirsin.
+- **UAP/UAİ alanlarının 4,5 metrelik sabit çapını ölçek kalibrasyonu için kullanmayı dene** — bu, şartnameye özel, çok değerli bir sabit referans.
+- **Kamera açısının her zaman tam nadir (90°, tam aşağı) olmayacağını unutma** (70-90° aralığı) — yer düzlemi varsayımına dayalı yöntemlerde bu açıyı hesaba katmalısın.
+- **"Sağlıklı" (health=1) dönemi bir kalibrasyon fırsatı olarak kullan:** İlk 1 dakika referans veri kesin sağlıklı — algoritmanı bu pencerede kendi kendine doğrulayıp parametrelerini (ör. ölçek faktörünü) ayarlayabilirsin.
+- **Video bozulmalarına (blur, donma, ölü piksel) karşı test senaryoları oluştur** — Mid-Air veri setindeki farklı hava koşulu görüntüleri bunun için uygun.
+- **`evo` paketiyle kendi test videolarında düzenli olarak hata ölçümü yap**, böylece yarışma formülüne (Denklem 2) yakın bir performans takibi yapmış olursun.
+
+---
+
+## Kısa Özet — Nereden Başlamalıyım?
+
+1. Python + NumPy öğren.
+2. 3Blue1Brown lineer cebir serisini izle.
+3. OpenCV ile temel görüntü işleme yap.
+4. Kamera modelini ve kalibrasyonu öğren.
+5. Avi Singh'in mono-vo projesini adım adım takip ederek **çalışan bir klasik VO sistemi kur.**
+6. Ölçek problemini çöz (UAP/UAİ çapı gibi ipuçlarıyla).
+7. `evo` ile kendi sistemini test et.
+8. Vaktin kalırsa, DeepVO/PoseNet tarzı bir derin öğrenme modeliyle iyileştirmeyi dene.
